@@ -1,0 +1,87 @@
+{
+  "uid": "online-cinema",
+  "title": "Online Cinema",
+  "schemaVersion": 41,
+  "version": 1,
+  "timezone": "utc",
+  "time": {"from": "now-30d", "to": "now"},
+  "refresh": "1m",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Retention Cohort Heatmap",
+      "type": "table",
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "movie-clickhouse"},
+      "gridPos": {"x": 0, "y": 0, "w": 24, "h": 13},
+      "options": {"showHeader": true},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 0,
+          "noValue": "—",
+          "color": {"mode": "thresholds"},
+          "custom": {"cellOptions": {"type": "color-background", "mode": "basic"}},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "transparent", "value": null},
+              {"color": "#272756", "value": 0},
+              {"color": "#394b84", "value": 0.25},
+              {"color": "#336c8b", "value": 0.5},
+              {"color": "#247d72", "value": 0.75}
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "Cohort"},
+            "properties": [
+              {"id": "custom.cellOptions", "value": {"type": "auto"}},
+              {"id": "unit", "value": "none"}
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "editorType": "sql",
+          "format": 1,
+          "rawSql": "SELECT toString(metric_date) AS Cohort,\n       retention_days[1] AS `Day 0`, retention_days[2] AS `Day 1`,\n       retention_days[3] AS `Day 2`, retention_days[4] AS `Day 3`,\n       retention_days[5] AS `Day 4`, retention_days[6] AS `Day 5`,\n       retention_days[7] AS `Day 6`, retention_days[8] AS `Day 7`\nFROM movie_analytics.daily_metrics\nWHERE metric_date BETWEEN toDate32($__fromTime_ms) AND toDate32($__toTime_ms)\n  AND cohort_size > 0\nORDER BY metric_date DESC"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Активные зрители (DAU)",
+      "type": "timeseries",
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "movie-clickhouse"},
+      "gridPos": {"x": 0, "y": 13, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"min": 0, "decimals": 0}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "editorType": "sql",
+          "format": 0,
+          "rawSql": "SELECT toDateTime64(metric_date, 3, 'UTC') AS time, dau\nFROM movie_analytics.daily_metrics\nWHERE metric_date BETWEEN toDate32($__fromTime_ms) AND toDate32($__toTime_ms)\nORDER BY time"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Конверсия просмотра",
+      "type": "timeseries",
+      "datasource": {"type": "grafana-clickhouse-datasource", "uid": "movie-clickhouse"},
+      "gridPos": {"x": 12, "y": 13, "w": 12, "h": 8},
+      "fieldConfig": {"defaults": {"min": 0, "unit": "percentunit"}, "overrides": []},
+      "targets": [
+        {
+          "refId": "A",
+          "editorType": "sql",
+          "format": 0,
+          "rawSql": "SELECT toDateTime64(metric_date, 3, 'UTC') AS time, view_conversion\nFROM movie_analytics.daily_metrics\nWHERE metric_date BETWEEN toDate32($__fromTime_ms) AND toDate32($__toTime_ms)\nORDER BY time"
+        }
+      ]
+    }
+  ]
+}

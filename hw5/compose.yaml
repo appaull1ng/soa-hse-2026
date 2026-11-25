@@ -1,0 +1,222 @@
+name: soa-hw5
+
+x-kafka-environment: &kafka-environment
+  CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093,2@kafka-2:29093,3@kafka-3:29093'
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+  KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+  KAFKA_MIN_INSYNC_REPLICAS: 1
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  KAFKA_HEAP_OPTS: '-Xms128m -Xmx384m'
+
+x-kafka-broker: &kafka-broker
+  image: confluentinc/cp-kafka:7.8.0
+  healthcheck:
+    test: [CMD, kafka-topics, --bootstrap-server, 'localhost:29092', --list]
+    interval: 5s
+    timeout: 8s
+    retries: 20
+
+services:
+  kafka:
+    <<: *kafka-broker
+    environment:
+      <<: *kafka-environment
+      KAFKA_NODE_ID: 1
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+
+  kafka-2:
+    <<: *kafka-broker
+    depends_on:
+      kafka:
+        condition: service_started
+    environment:
+      <<: *kafka-environment
+      KAFKA_NODE_ID: 2
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:29092
+    volumes:
+      - kafka-2-data:/var/lib/kafka/data
+
+  kafka-3:
+    <<: *kafka-broker
+    # Let brokers 1 and 2 elect the controller using the existing metadata log first.
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      <<: *kafka-environment
+      KAFKA_NODE_ID: 3
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:29092
+    volumes:
+      - kafka-3-data:/var/lib/kafka/data
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.8.0
+    entrypoint: [python3, /opt/prepare-topics.py]
+    volumes:
+      - ./kafka/prepare_topics.py:/opt/prepare-topics.py:ro
+    depends_on:
+      kafka:
+        condition: service_healthy
+      kafka-2:
+        condition: service_healthy
+      kafka-3:
+        condition: service_healthy
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.8.0
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: 'PLAINTEXT://kafka:29092,PLAINTEXT://kafka-2:29092,PLAINTEXT://kafka-3:29092'
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 3
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, curl, -fsS, 'http://localhost:8081/subjects']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  movie-service:
+    build: .
+    environment:
+      GENERATE_EVENTS: ${GENERATE_EVENTS:-0}
+      KAFKA_BROKERS: 'kafka:29092,kafka-2:29092,kafka-3:29092'
+    ports:
+      - '127.0.0.1:${MOVIE_API_PORT:-8000}:8000'
+    depends_on:
+      schema-registry:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8
+    environment:
+      CLICKHOUSE_DB: movie_analytics
+      CLICKHOUSE_USER: analytics
+      CLICKHOUSE_PASSWORD: local-analytics
+    ports:
+      - '127.0.0.1:${CLICKHOUSE_HTTP_PORT:-8123}:8123'
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse/01-events.sql:/docker-entrypoint-initdb.d/01-events.sql:ro
+      - ./clickhouse/kafka.xml:/etc/clickhouse-server/config.d/kafka.xml:ro
+      - ./clickhouse/grafana-user.xml:/etc/clickhouse-server/users.d/grafana.xml:ro
+    depends_on:
+      movie-service:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, clickhouse-client, --host, clickhouse, --user, analytics, --password, local-analytics,
+             --query, 'SELECT 1 FROM movie_analytics.raw_events LIMIT 0']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: movie_analytics
+      POSTGRES_USER: analytics
+      POSTGRES_PASSWORD: local-analytics
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD, pg_isready, -h, '127.0.0.1', -U, analytics, -d, movie_analytics]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  aggregation-service:
+    build: ./aggregation
+    environment:
+      AGGREGATION_INTERVAL_SECONDS: ${AGGREGATION_INTERVAL_SECONDS:-300}
+    ports:
+      - '127.0.0.1:${AGGREGATION_API_PORT:-8001}:8001'
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, "from urllib.request import urlopen; urlopen('http://127.0.0.1:8001/health', timeout=2)"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+  rustfs:
+    image: rustfs/rustfs:1.0.6
+    environment:
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: ':9000'
+      RUSTFS_CONSOLE_ADDRESS: ':9001'
+      RUSTFS_CONSOLE_ENABLE: 'true'
+      RUSTFS_ACCESS_KEY: analytics
+      RUSTFS_SECRET_KEY: local-analytics
+    ports:
+      - '127.0.0.1:${S3_API_PORT:-9000}:9000'
+      - '127.0.0.1:${S3_CONSOLE_PORT:-9001}:9001'
+    volumes:
+      - rustfs-data:/data
+    healthcheck:
+      test: [CMD, curl, -fsS, 'http://127.0.0.1:9000/health/ready']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  grafana:
+    build: ./grafana
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: local-grafana
+    ports:
+      - '127.0.0.1:${GRAFANA_PORT:-3000}:3000'
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      aggregation-service:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, 'http://127.0.0.1:3000/api/health']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  integration-test:
+    build: .
+    profiles: [test]
+    command: [python, -m, unittest, -v, test_pipeline]
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+  aggregation-test:
+    build: ./aggregation
+    profiles: [test]
+    command: [python, -m, unittest, -v, test_aggregation]
+    depends_on:
+      aggregation-service:
+        condition: service_healthy
+      rustfs:
+        condition: service_healthy
+
+volumes:
+  kafka-data:
+  kafka-2-data:
+  kafka-3-data:
+  clickhouse-data:
+  postgres-data:
+  rustfs-data:
+  grafana-data:

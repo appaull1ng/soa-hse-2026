@@ -1,0 +1,14 @@
+<clickhouse>
+    <users>
+        <grafana_reader>
+            <password>local-grafana</password>
+            <networks><ip>::/0</ip></networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <grants>
+                <query>GRANT SELECT ON movie_analytics.daily_metrics</query>
+                <query>GRANT SELECT ON movie_analytics.daily_metric_versions</query>
+            </grants>
+        </grafana_reader>
+    </users>
+</clickhouse>
